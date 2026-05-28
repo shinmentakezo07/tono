@@ -504,7 +504,18 @@ func main() {
 		if pgDSN == "" {
 			pgDSN = pgStoreDSN
 		}
-		if pgDSN != "" {
+
+		// Allow env var to override usage-history-postgres-enabled from config.
+		if value, ok := lookupEnv("USAGE_HISTORY_POSTGRES_ENABLED", "usage_history_postgres_enabled"); ok {
+			lv := strings.ToLower(strings.TrimSpace(value))
+			if lv == "false" || lv == "0" || lv == "no" || lv == "off" {
+				cfg.UsageHistoryPostgresEnabled = false
+			} else {
+				cfg.UsageHistoryPostgresEnabled = true
+			}
+		}
+
+		if cfg.UsageHistoryPostgresEnabled && pgDSN != "" {
 			pgCtx, pgCancel := context.WithTimeout(context.Background(), 15*time.Second)
 			pgStore, errPg := usagehistory.NewPgStore(pgCtx, pgDSN)
 			if errPg != nil {

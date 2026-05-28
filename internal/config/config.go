@@ -77,6 +77,11 @@ type Config struct {
 	// UsageHistoryEnabled toggles persistent JSONL storage of usage records.
 	UsageHistoryEnabled bool `yaml:"usage-history-enabled" json:"usage-history-enabled"`
 
+	// UsageHistoryPostgresEnabled toggles the TimescaleDB/Postgres backend for usage history.
+	// When false, only JSONL file storage is used even when a DSN is configured.
+	// Default: true.
+	UsageHistoryPostgresEnabled bool `yaml:"usage-history-postgres-enabled" json:"usage-history-postgres-enabled"`
+
 	// UsageHistoryDir is the directory where usage history JSONL files are stored.
 	// Default: "usage-history" (relative to working directory).
 	UsageHistoryDir string `yaml:"usage-history-dir" json:"usage-history-dir"`
@@ -668,6 +673,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.UsageStatisticsEnabled = false
 	cfg.RedisUsageQueueRetentionSeconds = 60
 	cfg.UsageHistoryEnabled = true
+	cfg.UsageHistoryPostgresEnabled = true
 	cfg.UsageHistoryDir = "usage-history"
 	cfg.UsageHistoryRetentionDays = 30
 	cfg.PrometheusMetricsEnabled = true

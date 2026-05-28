@@ -77,6 +77,8 @@ redis-usage-queue-retention-seconds: 60
 usage-history-enabled: true
 usage-history-dir: usage-history
 usage-history-retention-days: 30
+# Toggle TimescaleDB/Postgres backend for usage history. When false, only JSONL files are used.
+usage-history-postgres-enabled: true
 # TimescaleDB backend for usage history (optional, requires Postgres + TimescaleDB extension).
 # When empty, only JSONL file storage is used.
 usage-history-postgres-dsn: ""
