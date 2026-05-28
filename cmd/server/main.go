@@ -26,6 +26,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/managementasset"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/misc"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/redisqueue"
+	"github.com/router-for-me/CLIProxyAPI/v7/internal/usagehistory"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/registry"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/store"
 	_ "github.com/router-for-me/CLIProxyAPI/v7/internal/translator"
@@ -486,6 +487,17 @@ func main() {
 	}
 	redisqueue.SetUsageStatisticsEnabled(cfg.UsageStatisticsEnabled)
 	redisqueue.SetRetentionSeconds(cfg.RedisUsageQueueRetentionSeconds)
+
+	if cfg.UsageHistoryEnabled {
+		historyDir := cfg.UsageHistoryDir
+		if historyDir == "" {
+			historyDir = "usage-history"
+		}
+		usagehistory.InitStore(historyDir)
+		usagehistory.SetEnabled(true)
+		usagehistory.Compact(historyDir, cfg.UsageHistoryRetentionDays)
+		log.WithField("dir", historyDir).Info("usage history enabled")
+	}
 	coreauth.SetQuotaCooldownDisabled(cfg.DisableCooling)
 
 	if err = logging.ConfigureLogOutput(cfg); err != nil {
