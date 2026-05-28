@@ -7,19 +7,48 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/usagehistory"
 )
 
-// GetUsageHistory reads all JSONL history files and returns them as a merged array.
+// GetUsageHistory reads usage records from the TimescaleDB backend when available,
+// falling back to JSONL files. Supports ?days=N and ?limit=N query parameters.
 func (h *Handler) GetUsageHistory(c *gin.Context) {
 	if !usagehistory.Enabled() {
 		c.JSON(http.StatusOK, gin.H{"records": []interface{}{}})
 		return
 	}
 
+	// Parse query parameters.
+	days := 7
+	if d := c.Query("days"); d != "" {
+		if parsed, err := strconv.Atoi(d); err == nil && parsed > 0 {
+			days = parsed
+		}
+	}
+	limit := 1000
+	if l := c.Query("limit"); l != "" {
+		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+
+	// If TimescaleDB backend is available, query it directly.
+	if usagehistory.HasPgStore() {
+		since := time.Now().AddDate(0, 0, -days)
+		records, err := usagehistory.QueryHistory(c.Request.Context(), since, limit)
+		if err == nil {
+			c.JSON(http.StatusOK, gin.H{"records": records, "source": "postgres"})
+			return
+		}
+		// Fall through to JSONL on error.
+	}
+
+	// Fallback: read from JSONL files.
 	dir := h.cfg.UsageHistoryDir
 	if dir == "" {
 		dir = "usage-history"
@@ -43,12 +72,31 @@ func (h *Handler) GetUsageHistory(c *gin.Context) {
 	}
 	sort.Strings(files)
 
-	var records []json.RawMessage
+	var rawRecords []json.RawMessage
 	for _, path := range files {
-		readJSONLFile(path, &records)
+		readJSONLFile(path, &rawRecords)
 	}
 
-	c.JSON(http.StatusOK, gin.H{"records": records})
+	// Apply limit and days filter to JSONL results.
+	since := time.Now().AddDate(0, 0, -days)
+	var filtered []json.RawMessage
+	for _, raw := range rawRecords {
+		var rec struct {
+			Timestamp time.Time `json:"timestamp"`
+		}
+		if err := json.Unmarshal(raw, &rec); err != nil {
+			filtered = append(filtered, raw)
+			continue
+		}
+		if rec.Timestamp.IsZero() || rec.Timestamp.After(since) || rec.Timestamp.Equal(since) {
+			filtered = append(filtered, raw)
+		}
+		if len(filtered) >= limit {
+			break
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"records": filtered, "source": "jsonl"})
 }
 
 func readJSONLFile(path string, out *[]json.RawMessage) {

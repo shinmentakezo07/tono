@@ -77,6 +77,13 @@ redis-usage-queue-retention-seconds: 60
 usage-history-enabled: true
 usage-history-dir: usage-history
 usage-history-retention-days: 30
+# TimescaleDB backend for usage history (optional, requires Postgres + TimescaleDB extension).
+# When empty, only JSONL file storage is used.
+usage-history-postgres-dsn: ""
+usage-history-batch-size: 100
+usage-history-flush-interval: "5s"
+# Expose Prometheus metrics at /metrics (no management auth required).
+prometheus-metrics-enabled: true
 
 # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/
 # Per-entry proxy-url also supports "direct" or "none" to bypass both the global proxy-url and environment proxies explicitly.

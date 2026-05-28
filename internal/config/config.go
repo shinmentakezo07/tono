@@ -85,6 +85,22 @@ type Config struct {
 	// Default: 30. Set to 0 to keep forever.
 	UsageHistoryRetentionDays int `yaml:"usage-history-retention-days" json:"usage-history-retention-days"`
 
+	// UsageHistoryPostgresDSN is the PostgreSQL connection string for TimescaleDB usage history.
+	// When empty, only JSONL file storage is used (existing behavior).
+	// Example: "postgres://user:pass@localhost:5432/cliproxy?sslmode=disable"
+	UsageHistoryPostgresDSN string `yaml:"usage-history-postgres-dsn" json:"-"`
+
+	// UsageHistoryBatchSize controls how many records are buffered before flushing to Postgres.
+	// Default: 100. Lower values reduce data loss on crash; higher values improve throughput.
+	UsageHistoryBatchSize int `yaml:"usage-history-batch-size" json:"usage-history-batch-size"`
+
+	// UsageHistoryFlushInterval controls the maximum time between batch flushes to Postgres.
+	// Default: "5s". Ensures records are written even under low traffic.
+	UsageHistoryFlushInterval string `yaml:"usage-history-flush-interval" json:"usage-history-flush-interval"`
+
+	// PrometheusMetricsEnabled enables the /metrics endpoint with Prometheus counters.
+	PrometheusMetricsEnabled bool `yaml:"prometheus-metrics-enabled" json:"prometheus-metrics-enabled"`
+
 	// DisableCooling disables quota cooldown scheduling when true.
 	DisableCooling bool `yaml:"disable-cooling" json:"disable-cooling"`
 
@@ -654,6 +670,7 @@ func LoadConfigOptional(configFile string, optional bool) (*Config, error) {
 	cfg.UsageHistoryEnabled = true
 	cfg.UsageHistoryDir = "usage-history"
 	cfg.UsageHistoryRetentionDays = 30
+	cfg.PrometheusMetricsEnabled = true
 	cfg.DisableCooling = false
 	cfg.DisableImageGeneration = DisableImageGenerationOff
 	cfg.Pprof.Enable = false
@@ -1398,6 +1415,13 @@ func isKnownDefaultValue(path []string, node *yaml.Node) bool {
 			return node.Value == DefaultPanelGitHubRepository
 		case "routing.strategy":
 			return node.Value == "round-robin"
+		}
+	}
+	// Check boolean defaults
+	if node.Kind == yaml.ScalarNode && node.Tag == "!!bool" {
+		switch fullPath {
+		case "prometheus-metrics-enabled":
+			return node.Value == "true"
 		}
 	}
 

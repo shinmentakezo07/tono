@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/access"
 	managementHandlers "github.com/router-for-me/CLIProxyAPI/v7/internal/api/handlers/management"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api/middleware"
@@ -371,6 +372,12 @@ func (s *Server) setupRoutes() {
 	s.engine.GET("/healthz", healthzHandler)
 	s.engine.HEAD("/healthz", healthzHandler)
 
+	// Prometheus metrics endpoint (no auth required).
+	if s.cfg != nil && s.cfg.PrometheusMetricsEnabled {
+		s.engine.GET("/metrics", gin.WrapH(promhttp.Handler()))
+		log.Info("Prometheus /metrics endpoint enabled")
+	}
+
 	s.engine.GET("/management.html", s.serveManagementControlPanel)
 	openaiHandlers := openai.NewOpenAIAPIHandler(s.handlers)
 	geminiHandlers := gemini.NewGeminiAPIHandler(s.handlers)
@@ -381,6 +388,9 @@ func (s *Server) setupRoutes() {
 	// OpenAI compatible API routes
 	v1 := s.engine.Group("/v1")
 	v1.Use(AuthMiddleware(s.accessManager))
+	if s.cfg != nil && s.cfg.PrometheusMetricsEnabled {
+		v1.Use(middleware.UsageMetrics())
+	}
 	{
 		v1.GET("/models", s.unifiedModelsHandler(openaiHandlers, claudeCodeHandlers))
 		v1.POST("/chat/completions", openaiHandlers.ChatCompletions)
@@ -402,6 +412,9 @@ func (s *Server) setupRoutes() {
 	// Codex CLI direct route aliases (chatgpt_base_url compatible)
 	codexDirect := s.engine.Group("/backend-api/codex")
 	codexDirect.Use(AuthMiddleware(s.accessManager))
+	if s.cfg != nil && s.cfg.PrometheusMetricsEnabled {
+		codexDirect.Use(middleware.UsageMetrics())
+	}
 	{
 		codexDirect.GET("/responses", openaiResponsesHandlers.ResponsesWebsocket)
 		codexDirect.POST("/responses", openaiResponsesHandlers.Responses)
@@ -411,6 +424,9 @@ func (s *Server) setupRoutes() {
 	// Gemini compatible API routes
 	v1beta := s.engine.Group("/v1beta")
 	v1beta.Use(AuthMiddleware(s.accessManager))
+	if s.cfg != nil && s.cfg.PrometheusMetricsEnabled {
+		v1beta.Use(middleware.UsageMetrics())
+	}
 	{
 		v1beta.GET("/models", s.geminiModelsHandler(geminiHandlers))
 		v1beta.POST("/models/*action", geminiHandlers.GeminiHandler)

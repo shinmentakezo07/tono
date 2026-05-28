@@ -497,8 +497,45 @@ func main() {
 		usagehistory.SetEnabled(true)
 		usagehistory.Compact(historyDir, cfg.UsageHistoryRetentionDays)
 		log.WithField("dir", historyDir).Info("usage history enabled")
+
+		// TimescaleDB backend (optional).
+		if cfg.UsageHistoryPostgresDSN != "" {
+			pgCtx, pgCancel := context.WithTimeout(context.Background(), 15*time.Second)
+			pgStore, errPg := usagehistory.NewPgStore(pgCtx, cfg.UsageHistoryPostgresDSN)
+			if errPg != nil {
+				pgCancel()
+				log.WithError(errPg).Warn("usagehistory: failed to connect to Postgres, falling back to JSONL only")
+			} else {
+				if errSchema := pgStore.EnsureSchema(pgCtx, cfg.UsageHistoryPostgresDSN); errSchema != nil {
+					pgCancel()
+					log.WithError(errSchema).Warn("usagehistory: failed to ensure schema, falling back to JSONL only")
+					pgStore.Close()
+				} else {
+					if errRet := pgStore.SetRetentionPolicy(pgCtx, cfg.UsageHistoryRetentionDays); errRet != nil {
+						log.WithError(errRet).Warn("usagehistory: failed to set retention policy")
+					}
+					pgCancel()
+					batchSize := cfg.UsageHistoryBatchSize
+					if batchSize <= 0 {
+						batchSize = 100
+					}
+					flushInterval := 5 * time.Second
+					if cfg.UsageHistoryFlushInterval != "" {
+						if parsed, errParse := time.ParseDuration(cfg.UsageHistoryFlushInterval); errParse == nil {
+							flushInterval = parsed
+						}
+					}
+					w := usagehistory.NewWriter(pgStore, batchSize*10, batchSize, flushInterval)
+					w.Start(context.Background())
+					usagehistory.SetPgWriter(w)
+					log.WithField("dsn", cfg.UsageHistoryPostgresDSN).Info("usage history TimescaleDB backend enabled")
+				}
+			}
+		}
 	}
 	coreauth.SetQuotaCooldownDisabled(cfg.DisableCooling)
+	// Ensure TimescaleDB writer is flushed on shutdown.
+	defer usagehistory.StopPgWriter()
 
 	if err = logging.ConfigureLogOutput(cfg); err != nil {
 		log.Errorf("failed to configure log output: %v", err)

@@ -2,6 +2,7 @@ package usagehistory
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"time"
@@ -12,8 +13,9 @@ import (
 )
 
 var (
-	enabled atomic.Bool
-	store   *Store
+	enabled  atomic.Bool
+	store    *Store  // existing JSONL store
+	pgWriter *Writer // async TimescaleDB writer (nil when Postgres not configured)
 )
 
 func init() {
@@ -43,6 +45,32 @@ func CloseStore() {
 	if store != nil {
 		_ = store.Close()
 	}
+}
+
+// SetPgWriter sets the async TimescaleDB writer. Must be called before any usage records are processed.
+func SetPgWriter(w *Writer) {
+	pgWriter = w
+}
+
+// StopPgWriter stops the async TimescaleDB writer, flushing remaining records.
+func StopPgWriter() {
+	if pgWriter != nil {
+		pgWriter.Stop()
+	}
+}
+
+// HasPgStore returns true if the TimescaleDB backend is available.
+func HasPgStore() bool {
+	return pgWriter != nil && pgWriter.store != nil
+}
+
+// QueryHistory queries the TimescaleDB store for historical records.
+// Returns an error if PgStore is not initialized.
+func QueryHistory(ctx context.Context, since time.Time, limit int) ([]JSONLRecord, error) {
+	if pgWriter == nil || pgWriter.store == nil {
+		return nil, fmt.Errorf("usagehistory: TimescaleDB store not initialized")
+	}
+	return pgWriter.store.QueryHistory(ctx, since, limit)
 }
 
 type historyPlugin struct{}
@@ -110,5 +138,10 @@ func (p *historyPlugin) HandleUsage(ctx context.Context, record coreusage.Record
 
 	if err := store.Write(rec); err != nil {
 		log.WithError(err).Warn("usagehistory: failed to write record")
+	}
+
+	// Write to TimescaleDB via async writer (if configured).
+	if pgWriter != nil {
+		pgWriter.Write(fromJSONLRecord(&rec))
 	}
 }
