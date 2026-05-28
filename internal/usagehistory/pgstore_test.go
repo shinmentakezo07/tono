@@ -88,8 +88,8 @@ func TestPgRecordConversionDefaults(t *testing.T) {
 func TestWriterWriteDrain(t *testing.T) {
 	// Test that the writer channel can accept records and drain them on stop.
 	w := &Writer{
-		ch:    make(chan PgRecord, 10),
-		done:  make(chan struct{}),
+		ch:   make(chan PgRecord, 10),
+		done: make(chan struct{}),
 	}
 
 	rec := fromJSONLRecord(&JSONLRecord{
@@ -118,7 +118,7 @@ func TestWriterWriteFull(t *testing.T) {
 	}
 
 	rec := PgRecord{Model: "test"}
-	
+
 	// Fill the buffer.
 	if !w.Write(rec) {
 		t.Fatal("first write should succeed")
