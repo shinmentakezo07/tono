@@ -5,6 +5,7 @@ import "time"
 // JSONLRecord is the structure written to each line of a usage history JSONL file.
 // Field names match the redisqueue plugin's JSON output for frontend compatibility.
 type JSONLRecord struct {
+	EventID         string     `json:"event_id"`
 	Provider        string     `json:"provider"`
 	Model           string     `json:"model"`
 	Alias           string     `json:"alias"`

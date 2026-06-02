@@ -2,9 +2,12 @@ package usagehistory
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"embed"
+	"encoding/hex"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -88,23 +91,25 @@ func (s *PgStore) InsertBatch(ctx context.Context, records []PgRecord) error {
 	batch := &pgx.Batch{}
 	query := `
 		INSERT INTO usage_records (
-			created_at, provider, model, alias, endpoint, auth_type, api_key,
+			event_id, created_at, provider, model, alias, endpoint, auth_type, api_key,
 			request_id, reasoning_effort, latency_ms, source, auth_index,
 			input_tokens, output_tokens, reasoning_tokens, cached_tokens,
 			cache_read_tokens, cache_creation_tokens, total_tokens,
 			failed, fail_status_code, fail_body
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7,
-			$8, $9, $10, $11, $12,
-			$13, $14, $15, $16,
-			$17, $18, $19,
-			$20, $21, $22
-		)`
+			$1, $2, $3, $4, $5, $6, $7, $8,
+			$9, $10, $11, $12, $13,
+			$14, $15, $16, $17,
+			$18, $19, $20,
+			$21, $22, $23
+		)
+		ON CONFLICT (event_id, created_at) WHERE event_id <> '' DO NOTHING`
+
 
 	for i := range records {
 		r := &records[i]
 		batch.Queue(query,
-			r.CreatedAt, r.Provider, r.Model, r.Alias, r.Endpoint, r.AuthType, r.APIKey,
+			pgRecordEventID(r), r.CreatedAt, r.Provider, r.Model, r.Alias, r.Endpoint, r.AuthType, r.APIKey,
 			r.RequestID, r.ReasoningEffort, r.LatencyMs, r.Source, r.AuthIndex,
 			r.InputTokens, r.OutputTokens, r.ReasoningTokens, r.CachedTokens,
 			r.CacheReadTokens, r.CacheCreationTokens, r.TotalTokens,
@@ -131,7 +136,7 @@ func (s *PgStore) InsertBatch(ctx context.Context, records []PgRecord) error {
 // Returns records in JSONLRecord-compatible format for the management handler.
 func (s *PgStore) QueryHistory(ctx context.Context, since time.Time, limit int) ([]JSONLRecord, error) {
 	query := `
-		SELECT created_at, provider, model, alias, endpoint, auth_type, api_key,
+		SELECT event_id, created_at, provider, model, alias, endpoint, auth_type, api_key,
 			request_id, reasoning_effort, latency_ms, source, auth_index,
 			input_tokens, output_tokens, reasoning_tokens, cached_tokens,
 			cache_read_tokens, cache_creation_tokens, total_tokens,
@@ -151,7 +156,7 @@ func (s *PgStore) QueryHistory(ctx context.Context, since time.Time, limit int) 
 	for rows.Next() {
 		var r PgRecord
 		if err := rows.Scan(
-			&r.CreatedAt, &r.Provider, &r.Model, &r.Alias, &r.Endpoint, &r.AuthType, &r.APIKey,
+			&r.EventID, &r.CreatedAt, &r.Provider, &r.Model, &r.Alias, &r.Endpoint, &r.AuthType, &r.APIKey,
 			&r.RequestID, &r.ReasoningEffort, &r.LatencyMs, &r.Source, &r.AuthIndex,
 			&r.InputTokens, &r.OutputTokens, &r.ReasoningTokens, &r.CachedTokens,
 			&r.CacheReadTokens, &r.CacheCreationTokens, &r.TotalTokens,
@@ -162,6 +167,31 @@ func (s *PgStore) QueryHistory(ctx context.Context, since time.Time, limit int) 
 		records = append(records, r.toJSONLRecord())
 	}
 	return records, rows.Err()
+}
+
+// pgRecordEventID returns the record's idempotency key, generating a non-secret
+// deterministic fallback for package-local tests or legacy call sites.
+func pgRecordEventID(r *PgRecord) string {
+	if r == nil {
+		return ""
+	}
+	if id := strings.TrimSpace(r.EventID); id != "" {
+		return id
+	}
+	parts := []string{
+		strings.TrimSpace(r.Provider),
+		strings.TrimSpace(r.Model),
+		strings.TrimSpace(r.Alias),
+		strings.TrimSpace(r.Endpoint),
+		strings.TrimSpace(r.AuthType),
+		strings.TrimSpace(r.RequestID),
+		strings.TrimSpace(r.Source),
+		strings.TrimSpace(r.AuthIndex),
+		fmt.Sprintf("%d/%d/%d/%d/%d/%d/%d", r.InputTokens, r.OutputTokens, r.ReasoningTokens, r.CachedTokens, r.CacheReadTokens, r.CacheCreationTokens, r.TotalTokens),
+		fmt.Sprintf("%t/%d", r.Failed, r.FailStatusCode),
+	}
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x1f")))
+	return hex.EncodeToString(sum[:])
 }
 
 // Close closes the connection pool.

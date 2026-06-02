@@ -2,6 +2,7 @@ package usagehistory
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -38,7 +39,85 @@ func (m *mockStore) TotalRecords() int {
 	return total
 }
 
-// TestWriterDoesNotDropRecordsUnderBurst proves the Writer does not silently
+type flakyStore struct {
+	mu        sync.Mutex
+	failFirst bool
+	failed    bool
+	batches   [][]PgRecord
+}
+
+func (s *flakyStore) InsertBatch(ctx context.Context, records []PgRecord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failFirst {
+		s.failFirst = false
+		s.failed = true
+		return errors.New("temporary insert failure")
+	}
+	cp := make([]PgRecord, len(records))
+	copy(cp, records)
+	s.batches = append(s.batches, cp)
+	return nil
+}
+
+func (s *flakyStore) FailedOnce() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.failed
+}
+
+func (s *flakyStore) TotalRecords() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	total := 0
+	for _, b := range s.batches {
+		total += len(b)
+	}
+	return total
+}
+
+func TestWriterRetriesBatchAfterInsertFailure(t *testing.T) {
+	store := &flakyStore{failFirst: true}
+	w := NewWriter(nil, 1, 1, time.Hour)
+	w.SetInserter(store)
+	w.Start(context.Background())
+
+	if !w.Write(PgRecord{Model: "retry", TotalTokens: 1}) {
+		t.Fatal("Write returned false")
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for !store.FailedOnce() && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if !store.FailedOnce() {
+		t.Fatal("timed out waiting for first insert failure")
+	}
+
+	w.Stop()
+
+	if got := store.TotalRecords(); got != 1 {
+		t.Fatalf("stored records after retry = %d, want %d", got, 1)
+	}
+}
+
+func TestWriterRetriesFinalFlushOnStop(t *testing.T) {
+	store := &flakyStore{failFirst: true}
+	w := NewWriter(nil, 1, 10, time.Hour)
+	w.SetInserter(store)
+	w.Start(context.Background())
+
+	if !w.Write(PgRecord{Model: "final-retry", TotalTokens: 1}) {
+		t.Fatal("Write returned false")
+	}
+
+	w.Stop()
+
+	if got := store.TotalRecords(); got != 1 {
+		t.Fatalf("stored records after final retry = %d, want %d", got, 1)
+	}
+}
+
 // drop records when the producer outpaces the consumer. The contract is that
 // every record passed to Write is eventually handed to the store.
 //

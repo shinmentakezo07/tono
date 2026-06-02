@@ -2,6 +2,8 @@ package usagehistory
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"sync/atomic"
@@ -13,9 +15,10 @@ import (
 )
 
 var (
-	enabled  atomic.Bool
-	store    *Store  // existing JSONL store
-	pgWriter *Writer // async TimescaleDB writer (nil when Postgres not configured)
+	enabled    atomic.Bool
+	pgDegraded atomic.Bool
+	store      *Store  // existing JSONL store
+	pgWriter   *Writer // async TimescaleDB writer (nil when Postgres not configured)
 )
 
 func init() {
@@ -50,6 +53,7 @@ func CloseStore() {
 // SetPgWriter sets the async TimescaleDB writer. Must be called before any usage records are processed.
 func SetPgWriter(w *Writer) {
 	pgWriter = w
+	pgDegraded.Store(false)
 }
 
 // StopPgWriter stops the async TimescaleDB writer, flushing remaining records.
@@ -59,9 +63,19 @@ func StopPgWriter() {
 	}
 }
 
+// MarkPgDegraded forces management history queries to use JSONL fallback because
+// the Postgres backlog is known to be incomplete.
+func MarkPgDegraded() {
+	pgDegraded.Store(true)
+}
+
+func PgDegraded() bool {
+	return pgDegraded.Load()
+}
+
 // HasPgStore returns true if the TimescaleDB backend is available.
 func HasPgStore() bool {
-	return pgWriter != nil && pgWriter.store != nil
+	return !PgDegraded() && pgWriter != nil && pgWriter.store != nil
 }
 
 // QueryHistory queries the TimescaleDB store for historical records.
@@ -72,6 +86,24 @@ func QueryHistory(ctx context.Context, since time.Time, limit int) ([]JSONLRecor
 	}
 	return pgWriter.store.QueryHistory(ctx, since, limit)
 }
+
+func usageEventID(record coreusage.Record, endpoint, requestID string) string {
+	parts := []string{
+		strings.TrimSpace(record.Provider),
+		strings.TrimSpace(record.Model),
+		strings.TrimSpace(record.Alias),
+		strings.TrimSpace(endpoint),
+		strings.TrimSpace(record.AuthType),
+		strings.TrimSpace(requestID),
+		strings.TrimSpace(record.Source),
+		strings.TrimSpace(record.AuthIndex),
+		fmt.Sprintf("%d/%d/%d/%d/%d/%d/%d", record.Detail.InputTokens, record.Detail.OutputTokens, record.Detail.ReasoningTokens, record.Detail.CachedTokens, record.Detail.CacheReadTokens, record.Detail.CacheCreationTokens, record.Detail.TotalTokens),
+		fmt.Sprintf("%t/%d", record.Failed, record.Fail.StatusCode),
+	}
+	sum := sha256.Sum256([]byte(strings.Join(parts, "\x1f")))
+	return hex.EncodeToString(sum[:])
+}
+
 
 type historyPlugin struct{}
 
@@ -102,19 +134,26 @@ func (p *historyPlugin) HandleUsage(ctx context.Context, record coreusage.Record
 		authType = "unknown"
 	}
 
-	totalTokens := record.Detail.InputTokens + record.Detail.OutputTokens + record.Detail.ReasoningTokens
+	totalTokens := record.Detail.TotalTokens
 	if totalTokens == 0 {
-		totalTokens = record.Detail.InputTokens + record.Detail.OutputTokens + record.Detail.ReasoningTokens + record.Detail.CachedTokens
+		totalTokens = record.Detail.InputTokens + record.Detail.OutputTokens
+	}
+	if totalTokens == 0 {
+		totalTokens = record.Detail.CachedTokens
 	}
 
+	endpoint := strings.TrimSpace(logging.GetEndpoint(ctx))
+	requestID := strings.TrimSpace(logging.GetRequestID(ctx))
+
 	rec := JSONLRecord{
+		EventID:         usageEventID(record, endpoint, requestID),
 		Provider:        provider,
 		Model:           model,
 		Alias:           alias,
-		Endpoint:        strings.TrimSpace(logging.GetEndpoint(ctx)),
+		Endpoint:        endpoint,
 		AuthType:        authType,
 		APIKey:          strings.TrimSpace(record.APIKey),
-		RequestID:       strings.TrimSpace(logging.GetRequestID(ctx)),
+		RequestID:       requestID,
 		ReasoningEffort: strings.TrimSpace(record.ReasoningEffort),
 		Timestamp:       timestamp,
 		LatencyMs:       record.Latency.Milliseconds(),
@@ -138,9 +177,12 @@ func (p *historyPlugin) HandleUsage(ctx context.Context, record coreusage.Record
 
 	if err := store.Write(rec); err != nil {
 		log.WithError(err).Warn("usagehistory: failed to write record")
+		return
 	}
 
-	// Write to TimescaleDB via async writer (if configured).
+	// Write to TimescaleDB via async writer (if configured). Records reach the
+	// Postgres writer only after JSONL persistence succeeds, so JSONL remains the
+	// durable fallback if the Postgres backlog is later degraded.
 	if pgWriter != nil {
 		pgWriter.Write(fromJSONLRecord(&rec))
 	}

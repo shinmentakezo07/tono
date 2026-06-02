@@ -5,6 +5,7 @@ import "time"
 // PgRecord is the flat structure stored in the TimescaleDB hypertable.
 // Field names match the SQL column names exactly.
 type PgRecord struct {
+	EventID             string
 	CreatedAt           time.Time
 	Provider            string
 	Model               string
@@ -32,6 +33,7 @@ type PgRecord struct {
 // toJSONLRecord converts a PgRecord to a JSONLRecord for API response compatibility.
 func (r *PgRecord) toJSONLRecord() JSONLRecord {
 	return JSONLRecord{
+		EventID:         r.EventID,
 		Provider:        r.Provider,
 		Model:           r.Model,
 		Alias:           r.Alias,
@@ -64,6 +66,7 @@ func (r *PgRecord) toJSONLRecord() JSONLRecord {
 // fromJSONLRecord converts a JSONLRecord to a PgRecord for DB insertion.
 func fromJSONLRecord(r *JSONLRecord) PgRecord {
 	return PgRecord{
+		EventID:             r.EventID,
 		CreatedAt:           r.Timestamp,
 		Provider:            r.Provider,
 		Model:               r.Model,
