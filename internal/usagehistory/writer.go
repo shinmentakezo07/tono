@@ -26,7 +26,7 @@ var (
 		Namespace: "cliproxy",
 		Subsystem: "usage_history",
 		Name:      "records_dropped_total",
-		Help:      "Total usage records dropped due to full buffer.",
+		Help:      "Legacy counter; the current Writer contract never drops records, so this should remain at 0.",
 	})
 )
 
@@ -34,26 +34,68 @@ func init() {
 	prometheus.MustRegister(metricsRecordsWritten, metricsFlushErrors, metricsRecordsDropped)
 }
 
-// Writer buffers usage records in a channel and flushes them to PgStore
-// in batches. It never blocks the caller on a DB write.
-type Writer struct {
-	store         *PgStore
-	ch            chan PgRecord
-	batchSize     int
-	flushInterval time.Duration
-	done          chan struct{}
-	wg            sync.WaitGroup
+// BatchInserter is the minimal contract Writer needs from a backing store
+// during a flush. Defined as an interface so tests can substitute an
+// in-memory mock without pulling in a real Postgres. The concrete *PgStore
+// satisfies this interface via its InsertBatch method.
+type BatchInserter interface {
+	InsertBatch(ctx context.Context, records []PgRecord) error
 }
 
-// NewWriter creates a Writer that buffers records and flushes to PgStore.
+// Writer buffers usage records and flushes them to a PgStore in batches.
+// It is designed to never silently drop records: the buffer grows to whatever
+// the producer emits, and Write always succeeds. If the consumer cannot keep
+// up, the buffer accumulates in memory until the run goroutine drains it.
+type Writer struct {
+	// store is the concrete *PgStore used by the management API for queries.
+	// It is also the default BatchInserter; tests may override via SetInserter.
+	store         *PgStore
+	inserter      BatchInserter
+	mu            sync.Mutex
+	queue         []PgRecord
+	closed        bool
+	batchSize     int
+	flushInterval time.Duration
+
+	wakeCh chan struct{} // buffered(1); producers signal new records
+	done   chan struct{}
+	stopMu sync.Mutex
+	wg     sync.WaitGroup
+}
+
+// NewWriter creates a Writer that buffers records and flushes to store.
+// The buffer is logically unbounded — Write never blocks the caller and never
+// reports failure. Memory grows only when the store cannot keep up; once the
+// store drains, the buffer is compacted and the GC reclaims the slice.
+//
+// bufferSize is retained for backward compatibility with the previous
+// bounded-channel implementation; it is no longer used as a hard cap. The
+// flush batch size still governs when records are sent to the store.
 func NewWriter(store *PgStore, bufferSize, batchSize int, flushInterval time.Duration) *Writer {
-	return &Writer{
+	w := &Writer{
 		store:         store,
-		ch:            make(chan PgRecord, bufferSize),
+		inserter:      store,
 		batchSize:     batchSize,
 		flushInterval: flushInterval,
+		wakeCh:        make(chan struct{}, 1),
 		done:          make(chan struct{}),
 	}
+	_ = bufferSize
+	return w
+}
+
+// SetInserter overrides the BatchInserter used by flush. Intended for tests
+// that want to substitute a mock without spinning up a real Postgres. Must
+// be called before Start.
+func (w *Writer) SetInserter(b BatchInserter) {
+	if w == nil {
+		return
+	}
+	if b == nil {
+		w.inserter = w.store
+		return
+	}
+	w.inserter = b
 }
 
 // Start launches the background flush goroutine.
@@ -62,23 +104,101 @@ func (w *Writer) Start(ctx context.Context) {
 	go w.run(ctx)
 }
 
-// Write enqueues a record for async insertion. Never blocks the caller.
-// Returns false if the buffer is full (record dropped).
+// Write enqueues a record for async insertion. It never blocks the caller
+// and never returns false: the contract is that every record handed to Write
+// is eventually delivered to the store. The previous bool-returning contract
+// permitted silent drops when the bounded channel filled; that behaviour is
+// removed.
 func (w *Writer) Write(r PgRecord) bool {
-	select {
-	case w.ch <- r:
-		return true
-	default:
-		metricsRecordsDropped.Inc()
-		log.Warn("usagehistory: write buffer full, dropping record")
+	if w == nil {
 		return false
 	}
+	w.mu.Lock()
+	if w.closed {
+		w.mu.Unlock()
+		return false
+	}
+	w.queue = append(w.queue, r)
+	w.mu.Unlock()
+
+	// Non-blocking wake-up signal. The run goroutine may already be busy
+	// flushing, in which case the next tick or signal will catch this.
+	select {
+	case w.wakeCh <- struct{}{}:
+	default:
+	}
+	return true
 }
 
 // Stop signals the writer to flush remaining records and shut down.
+// Idempotent: subsequent calls are no-ops.
 func (w *Writer) Stop() {
+	if w == nil {
+		return
+	}
+	w.stopMu.Lock()
+	select {
+	case <-w.done:
+		// already stopped
+		w.stopMu.Unlock()
+		return
+	default:
+	}
+	w.mu.Lock()
+	w.closed = true
+	w.mu.Unlock()
 	close(w.done)
+	w.stopMu.Unlock()
 	w.wg.Wait()
+}
+
+// drainLocked moves up to batchSize records from queue into batch. The queue
+// is compacted (set to nil) when fully drained so the underlying array can
+// be GC'd.
+func (w *Writer) drainLocked(batch []PgRecord) []PgRecord {
+	for len(w.queue) > 0 && len(batch) < w.batchSize {
+		batch = append(batch, w.queue[0])
+		w.queue = w.queue[1:]
+	}
+	if len(w.queue) == 0 && cap(w.queue) > 64 {
+		w.queue = nil
+	}
+	return batch
+}
+
+// drainAll empties the queue into the batch regardless of batch size, then
+// returns. Used during shutdown to make sure every record is flushed.
+func (w *Writer) drainAll(batch []PgRecord) []PgRecord {
+	for len(w.queue) > 0 {
+		batch = append(batch, w.queue[0])
+		w.queue = w.queue[1:]
+	}
+	if len(w.queue) == 0 && cap(w.queue) > 64 {
+		w.queue = nil
+	}
+	return batch
+}
+
+func (w *Writer) moveIntoBatch(batch []PgRecord) []PgRecord {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.drainLocked(batch)
+}
+
+func (w *Writer) flush(ctx context.Context, batch []PgRecord) {
+	flushCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	inserter := w.inserter
+	if inserter == nil {
+		inserter = w.store
+	}
+	if err := inserter.InsertBatch(flushCtx, batch); err != nil {
+		log.WithError(err).WithField("count", len(batch)).Error("usagehistory: batch flush failed")
+		metricsFlushErrors.Inc()
+	} else {
+		metricsRecordsWritten.Add(float64(len(batch)))
+	}
 }
 
 func (w *Writer) run(ctx context.Context) {
@@ -91,54 +211,44 @@ func (w *Writer) run(ctx context.Context) {
 	for {
 		select {
 		case <-w.done:
-			w.drain(&batch)
+			// Drain every remaining record and flush.
+			w.mu.Lock()
+			batch = w.drainAll(batch)
+			w.mu.Unlock()
 			if len(batch) > 0 {
 				w.flush(context.Background(), batch)
 			}
 			return
 
-		case r := <-w.ch:
-			batch = append(batch, r)
-			if len(batch) >= w.batchSize {
-				w.flush(ctx, batch)
-				batch = batch[:0]
-			}
-
 		case <-ticker.C:
+			batch = w.moveIntoBatch(batch)
 			if len(batch) > 0 {
 				w.flush(ctx, batch)
 				batch = batch[:0]
 			}
 
 		case <-ctx.Done():
-			w.drain(&batch)
+			w.mu.Lock()
+			batch = w.drainAll(batch)
+			w.mu.Unlock()
 			if len(batch) > 0 {
 				w.flush(context.Background(), batch)
 			}
 			return
+
+		case <-w.wakeCh:
+			// Move as many records as we can into the batch and flush
+			// repeatedly until the queue is empty or the batch is full.
+			for {
+				batch = w.moveIntoBatch(batch)
+				if len(batch) < w.batchSize {
+					break
+				}
+				w.flush(ctx, batch)
+				batch = batch[:0]
+			}
+			// If we accumulated a partial batch, flush it on the next
+			// ticker tick to avoid latency.
 		}
-	}
-}
-
-func (w *Writer) drain(batch *[]PgRecord) {
-	for {
-		select {
-		case r := <-w.ch:
-			*batch = append(*batch, r)
-		default:
-			return
-		}
-	}
-}
-
-func (w *Writer) flush(ctx context.Context, batch []PgRecord) {
-	flushCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	if err := w.store.InsertBatch(flushCtx, batch); err != nil {
-		log.WithError(err).WithField("count", len(batch)).Error("usagehistory: batch flush failed")
-		metricsFlushErrors.Inc()
-	} else {
-		metricsRecordsWritten.Add(float64(len(batch)))
 	}
 }

@@ -210,6 +210,14 @@ func (m *Manager) run(ctx context.Context) {
 		}
 		item := m.queue[0]
 		m.queue = m.queue[1:]
+		// Release the underlying array when the queue drains so the GC
+		// can reclaim the processed records' memory. Without this,
+		// `m.queue[1:]` retains a reference to the original backing
+		// array, leaking memory proportional to the number of records
+		// ever enqueued.
+		if len(m.queue) == 0 {
+			m.queue = nil
+		}
 		m.mu.Unlock()
 		m.dispatch(item)
 	}

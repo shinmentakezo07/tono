@@ -1,6 +1,7 @@
 package usagehistory
 
 import (
+	"context"
 	"testing"
 	"time"
 )
@@ -86,53 +87,53 @@ func TestPgRecordConversionDefaults(t *testing.T) {
 }
 
 func TestWriterWriteDrain(t *testing.T) {
-	// Test that the writer channel can accept records and drain them on stop.
-	w := &Writer{
-		ch:   make(chan PgRecord, 10),
-		done: make(chan struct{}),
-	}
+	// Test that the writer can accept records and drain them on stop.
+	// The Writer contract is now "no drops": Write always succeeds, the
+	// internal queue is drained into the batch.
+	store := &mockStore{}
+	w := NewWriter(nil, 10, 100, 10*time.Millisecond)
+	w.SetInserter(store)
+	w.Start(context.Background())
 
 	rec := fromJSONLRecord(&JSONLRecord{
 		Model:  "test-model",
 		Tokens: TokenStats{TotalTokens: 100},
 	})
 
-	// Write should not block when buffer has room.
 	if !w.Write(rec) {
-		t.Error("Write should return true when buffer has room")
+		t.Fatal("Write should return true")
 	}
 
-	// Drain should read the record.
-	var batch []PgRecord
-	w.drain(&batch)
-	if len(batch) != 1 {
-		t.Errorf("expected 1 drained record, got %d", len(batch))
+	// Stop drains remaining records and flushes.
+	w.Stop()
+
+	if got := store.TotalRecords(); got != 1 {
+		t.Errorf("expected 1 drained record, got %d", got)
 	}
 }
 
-func TestWriterWriteFull(t *testing.T) {
-	// Test that Write returns false when channel is full.
-	w := &Writer{
-		ch:   make(chan PgRecord, 1),
-		done: make(chan struct{}),
+// TestWriterWriteNeverDrops is the regression test for the production bug
+// where the bounded channel silently dropped records past 1000. The current
+// contract is that Write never returns false on a non-closed Writer,
+// regardless of how many records have been enqueued.
+func TestWriterWriteNeverDrops(t *testing.T) {
+	store := &mockStore{}
+	w := NewWriter(nil, 1, 1, 10*time.Millisecond)
+	w.SetInserter(store)
+	w.Start(context.Background())
+
+	// Way more records than the (no longer used) buffer size.
+	const N = 5000
+	for i := 0; i < N; i++ {
+		if !w.Write(PgRecord{Model: "burst"}) {
+			t.Fatalf("Write returned false at record %d — drops are not allowed", i)
+		}
 	}
 
-	rec := PgRecord{Model: "test"}
+	// Stop drains remaining records and flushes.
+	w.Stop()
 
-	// Fill the buffer.
-	if !w.Write(rec) {
-		t.Fatal("first write should succeed")
-	}
-
-	// This should fail since buffer is full.
-	if w.Write(rec) {
-		t.Error("Write should return false when buffer is full")
-	}
-
-	// Drain it.
-	var batch []PgRecord
-	w.drain(&batch)
-	if len(batch) != 1 {
-		t.Errorf("expected 1 drained record, got %d", len(batch))
+	if got := store.TotalRecords(); got != N {
+		t.Fatalf("expected all %d records stored, got %d (lost %d)", N, got, N-got)
 	}
 }
