@@ -18,17 +18,19 @@ import (
 )
 
 type UsageReporter struct {
-	provider    string
-	model       string
-	alias       string
-	authID      string
-	authIndex   string
-	authType    string
-	apiKey      string
-	source      string
-	reasoning   string
-	requestedAt time.Time
-	once        sync.Once
+	provider      string
+	model         string
+	alias         string
+	authID        string
+	authIndex     string
+	authType      string
+	apiKey        string
+	source        string
+	reasoning     string
+	requestedAt   time.Time
+	once          sync.Once
+	trackedMu     sync.Mutex
+	trackedDetail usage.Detail
 }
 
 func NewUsageReporter(ctx context.Context, provider, model string, auth *cliproxyauth.Auth) *UsageReporter {
@@ -82,7 +84,10 @@ func (r *UsageReporter) buildAdditionalModelRecord(model string, detail usage.De
 }
 
 func (r *UsageReporter) PublishFailure(ctx context.Context, errs ...error) {
-	r.publishWithOutcome(ctx, usage.Detail{}, true, failFromErrors(errs...))
+	if r == nil {
+		return
+	}
+	r.publishTrackedWithOutcome(ctx, true, failFromErrors(errs...))
 }
 
 func (r *UsageReporter) TrackFailure(ctx context.Context, errPtr *error) {
@@ -104,9 +109,68 @@ func (r *UsageReporter) publishWithOutcome(ctx context.Context, detail usage.Det
 	})
 }
 
+func (r *UsageReporter) TrackUsage(detail usage.Detail) {
+	if r == nil {
+		return
+	}
+	r.trackedMu.Lock()
+	defer r.trackedMu.Unlock()
+	r.trackedDetail = mergeUsageDetails(r.trackedDetail, detail)
+}
+
+func (r *UsageReporter) PublishTracked(ctx context.Context) {
+	r.publishTrackedWithOutcome(ctx, false, usage.Failure{})
+}
+
+func (r *UsageReporter) publishTrackedWithOutcome(ctx context.Context, failed bool, fail usage.Failure) {
+	if r == nil {
+		return
+	}
+	r.once.Do(func() {
+		r.publishRecord(ctx, r.buildTrackedRecord(failed, fail))
+	})
+}
+
+func (r *UsageReporter) buildTrackedRecord(failed bool, fail usage.Failure) usage.Record {
+	if r == nil {
+		return usage.Record{Failed: failed, Fail: fail}
+	}
+	r.trackedMu.Lock()
+	detail := r.trackedDetail
+	r.trackedMu.Unlock()
+	return r.buildRecord(normalizeUsageDetailTotal(detail), failed, fail)
+}
+
+func mergeUsageDetails(current, next usage.Detail) usage.Detail {
+	merged := current
+	if next.InputTokens > merged.InputTokens {
+		merged.InputTokens = next.InputTokens
+	}
+	if next.OutputTokens > merged.OutputTokens {
+		merged.OutputTokens = next.OutputTokens
+	}
+	if next.ReasoningTokens > merged.ReasoningTokens {
+		merged.ReasoningTokens = next.ReasoningTokens
+	}
+	if next.CachedTokens > merged.CachedTokens {
+		merged.CachedTokens = next.CachedTokens
+	}
+	if next.CacheReadTokens > merged.CacheReadTokens {
+		merged.CacheReadTokens = next.CacheReadTokens
+	}
+	if next.CacheCreationTokens > merged.CacheCreationTokens {
+		merged.CacheCreationTokens = next.CacheCreationTokens
+	}
+	merged.TotalTokens = merged.InputTokens + merged.OutputTokens
+	if merged.TotalTokens == 0 && next.TotalTokens > current.TotalTokens {
+		merged.TotalTokens = next.TotalTokens
+	}
+	return merged
+}
+
 func normalizeUsageDetailTotal(detail usage.Detail) usage.Detail {
 	if detail.TotalTokens == 0 {
-		total := detail.InputTokens + detail.OutputTokens + detail.ReasoningTokens
+		total := detail.InputTokens + detail.OutputTokens
 		if total > 0 {
 			detail.TotalTokens = total
 		}
@@ -132,9 +196,7 @@ func (r *UsageReporter) EnsurePublished(ctx context.Context) {
 	if r == nil {
 		return
 	}
-	r.once.Do(func() {
-		r.publishRecord(ctx, r.buildRecord(usage.Detail{}, false, usage.Failure{}))
-	})
+	r.PublishTracked(ctx)
 }
 
 func (r *UsageReporter) publishRecord(ctx context.Context, record usage.Record) {

@@ -169,6 +169,40 @@ func TestUsageReporterBuildRecordIncludesReasoningEffort(t *testing.T) {
 	}
 }
 
+func TestNormalizeUsageDetailTotalDoesNotDoubleCountReasoningTokens(t *testing.T) {
+	detail := normalizeUsageDetailTotal(usage.Detail{
+		InputTokens:     10,
+		OutputTokens:    20,
+		ReasoningTokens: 7,
+	})
+
+	if detail.TotalTokens != 30 {
+		t.Fatalf("total tokens = %d, want %d", detail.TotalTokens, 30)
+	}
+}
+
+func TestUsageReporterTracksLatestStreamUsageBeforeEnsurePublished(t *testing.T) {
+	reporter := &UsageReporter{
+		provider:    "claude",
+		model:       "claude-sonnet-4-6",
+		requestedAt: time.Now(),
+	}
+
+	reporter.TrackUsage(usage.Detail{InputTokens: 10, TotalTokens: 10})
+	reporter.TrackUsage(usage.Detail{OutputTokens: 5, TotalTokens: 5})
+
+	record := reporter.buildTrackedRecord(false, usage.Failure{})
+	if record.Detail.InputTokens != 10 {
+		t.Fatalf("input tokens = %d, want %d", record.Detail.InputTokens, 10)
+	}
+	if record.Detail.OutputTokens != 5 {
+		t.Fatalf("output tokens = %d, want %d", record.Detail.OutputTokens, 5)
+	}
+	if record.Detail.TotalTokens != 15 {
+		t.Fatalf("total tokens = %d, want %d", record.Detail.TotalTokens, 15)
+	}
+}
+
 func TestUsageReporterBuildAdditionalModelRecordSkipsZeroTokens(t *testing.T) {
 	reporter := &UsageReporter{
 		provider:    "codex",

@@ -3,6 +3,7 @@
 -- Requires TimescaleDB extension: CREATE EXTENSION IF NOT EXISTS timescaledb;
 
 CREATE TABLE IF NOT EXISTS usage_records (
+    event_id            TEXT NOT NULL DEFAULT '',
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     provider            TEXT NOT NULL DEFAULT 'unknown',
     model               TEXT NOT NULL DEFAULT 'unknown',
@@ -39,6 +40,12 @@ EXCEPTION
     WHEN OTHERS THEN
         RAISE WARNING 'create_hypertable failed (TimescaleDB not installed?) — table works as regular Postgres: %', SQLERRM;
 END $$;
+
+-- Idempotency for retry-safe writes. Include created_at because TimescaleDB
+-- requires unique indexes on hypertables to cover the partitioning column.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_usage_records_event_id_created_at
+    ON usage_records (event_id, created_at)
+    WHERE event_id <> '';
 
 -- Compound index: "usage per model per day", "top accounts"
 CREATE INDEX IF NOT EXISTS idx_usage_records_provider_model_key

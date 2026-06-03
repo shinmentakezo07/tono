@@ -2,13 +2,67 @@ package usagehistory
 
 import (
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
+
+	coreusage "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/usage"
 )
+
+func TestHandleUsagePreservesProviderReportedTotalTokens(t *testing.T) {
+	tmpDir := t.TempDir()
+	oldEnabled := Enabled()
+	oldStore := store
+	oldWriter := pgWriter
+	SetEnabled(true)
+	InitStore(tmpDir)
+	SetPgWriter(nil)
+	t.Cleanup(func() {
+		SetEnabled(oldEnabled)
+		CloseStore()
+		store = oldStore
+		pgWriter = oldWriter
+	})
+
+	requestedAt := time.Date(2026, 6, 2, 12, 0, 0, 0, time.UTC)
+	plugin := &historyPlugin{}
+	plugin.HandleUsage(context.Background(), coreusage.Record{
+		Provider:    "openai",
+		Model:       "gpt-5.4",
+		Alias:       "client-model",
+		AuthType:    "apikey",
+		RequestedAt: requestedAt,
+		Detail: coreusage.Detail{
+			InputTokens:     100,
+			OutputTokens:    50,
+			ReasoningTokens: 20,
+			TotalTokens:     150,
+		},
+	})
+	CloseStore()
+
+	data, err := os.ReadFile(filepath.Join(tmpDir, "usage-2026-06-02.jsonl"))
+	if err != nil {
+		t.Fatalf("read usage history: %v", err)
+	}
+	var record JSONLRecord
+	if err := json.Unmarshal(data, &record); err != nil {
+		t.Fatalf("decode usage history: %v", err)
+	}
+	if record.EventID == "" {
+		t.Fatal("event id is empty")
+	}
+	if record.Tokens.TotalTokens != 150 {
+		t.Fatalf("total tokens = %d, want provider-reported %d", record.Tokens.TotalTokens, 150)
+	}
+}
 
 func TestPgRecordConversionRoundTrip(t *testing.T) {
 	ts := time.Date(2026, 5, 28, 12, 0, 0, 0, time.UTC)
 	orig := JSONLRecord{
+		EventID:         "evt-123",
 		Provider:        "openai",
 		Model:           "gpt-4",
 		Alias:           "gpt-4-alias",
@@ -40,6 +94,9 @@ func TestPgRecordConversionRoundTrip(t *testing.T) {
 	pgRec := fromJSONLRecord(&orig)
 	result := pgRec.toJSONLRecord()
 
+	if result.EventID != orig.EventID {
+		t.Errorf("EventID: got %q, want %q", result.EventID, orig.EventID)
+	}
 	if result.Provider != orig.Provider {
 		t.Errorf("Provider: got %q, want %q", result.Provider, orig.Provider)
 	}

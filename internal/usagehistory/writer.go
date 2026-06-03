@@ -26,7 +26,7 @@ var (
 		Namespace: "cliproxy",
 		Subsystem: "usage_history",
 		Name:      "records_dropped_total",
-		Help:      "Legacy counter; the current Writer contract never drops records, so this should remain at 0.",
+		Help:      "Total usage records dropped from the in-memory Postgres writer queue after JSONL persistence when the Postgres backlog cap is exceeded.",
 	})
 )
 
@@ -42,10 +42,14 @@ type BatchInserter interface {
 	InsertBatch(ctx context.Context, records []PgRecord) error
 }
 
+const maxQueuedRecords = 100000
+
 // Writer buffers usage records and flushes them to a PgStore in batches.
-// It is designed to never silently drop records: the buffer grows to whatever
-// the producer emits, and Write always succeeds. If the consumer cannot keep
-// up, the buffer accumulates in memory until the run goroutine drains it.
+// It avoids producer-side drops under normal load: the buffer grows until the
+// Postgres backlog cap is reached, and Write succeeds until the writer is
+// closed. If Postgres remains unavailable past the cap, the writer drops the
+// oldest Postgres backlog entries; the JSONL history sink has already persisted
+// those records before they reach this writer.
 type Writer struct {
 	// store is the concrete *PgStore used by the management API for queries.
 	// It is also the default BatchInserter; tests may override via SetInserter.
@@ -105,10 +109,9 @@ func (w *Writer) Start(ctx context.Context) {
 }
 
 // Write enqueues a record for async insertion. It never blocks the caller
-// and never returns false: the contract is that every record handed to Write
-// is eventually delivered to the store. The previous bool-returning contract
-// permitted silent drops when the bounded channel filled; that behaviour is
-// removed.
+// and never returns false before the writer is closed. The previous
+// bool-returning contract permitted silent drops when the bounded channel
+// filled; that behaviour is removed.
 func (w *Writer) Write(r PgRecord) bool {
 	if w == nil {
 		return false
@@ -119,6 +122,13 @@ func (w *Writer) Write(r PgRecord) bool {
 		return false
 	}
 	w.queue = append(w.queue, r)
+	if len(w.queue) > maxQueuedRecords {
+		w.queue[0] = PgRecord{}
+		w.queue = w.queue[1:]
+		metricsRecordsDropped.Inc()
+		MarkPgDegraded()
+		log.WithField("max_queue", maxQueuedRecords).Warn("usagehistory: postgres writer queue full; marked postgres history degraded and dropped oldest backlog record")
+	}
 	w.mu.Unlock()
 
 	// Non-blocking wake-up signal. The run goroutine may already be busy
@@ -185,7 +195,7 @@ func (w *Writer) moveIntoBatch(batch []PgRecord) []PgRecord {
 	return w.drainLocked(batch)
 }
 
-func (w *Writer) flush(ctx context.Context, batch []PgRecord) {
+func (w *Writer) flush(ctx context.Context, batch []PgRecord) bool {
 	flushCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
@@ -196,9 +206,28 @@ func (w *Writer) flush(ctx context.Context, batch []PgRecord) {
 	if err := inserter.InsertBatch(flushCtx, batch); err != nil {
 		log.WithError(err).WithField("count", len(batch)).Error("usagehistory: batch flush failed")
 		metricsFlushErrors.Inc()
-	} else {
-		metricsRecordsWritten.Add(float64(len(batch)))
+		return false
 	}
+	metricsRecordsWritten.Add(float64(len(batch)))
+	return true
+}
+
+func (w *Writer) flushFinal(batch []PgRecord, reason string) {
+	if len(batch) == 0 {
+		return
+	}
+	for attempt := 0; attempt < 3; attempt++ {
+		if w.flush(context.Background(), batch) {
+			return
+		}
+		if attempt < 2 {
+			delay := time.Duration(attempt+1) * 100 * time.Millisecond
+			log.WithField("count", len(batch)).WithField("reason", reason).WithField("retry_in", delay).Warn("usagehistory: retrying final flush")
+			time.Sleep(delay)
+		}
+	}
+	MarkPgDegraded()
+	log.WithField("count", len(batch)).WithField("reason", reason).Error("usagehistory: failed final postgres flush after retries; marked postgres history degraded")
 }
 
 func (w *Writer) run(ctx context.Context) {
@@ -211,19 +240,17 @@ func (w *Writer) run(ctx context.Context) {
 	for {
 		select {
 		case <-w.done:
-			// Drain every remaining record and flush.
+			// Drain every remaining record and flush. Final flush retries until
+			// success to preserve the writer's no-drop contract.
 			w.mu.Lock()
 			batch = w.drainAll(batch)
 			w.mu.Unlock()
-			if len(batch) > 0 {
-				w.flush(context.Background(), batch)
-			}
+			w.flushFinal(batch, "shutdown")
 			return
 
 		case <-ticker.C:
 			batch = w.moveIntoBatch(batch)
-			if len(batch) > 0 {
-				w.flush(ctx, batch)
+			if len(batch) > 0 && w.flush(ctx, batch) {
 				batch = batch[:0]
 			}
 
@@ -231,9 +258,7 @@ func (w *Writer) run(ctx context.Context) {
 			w.mu.Lock()
 			batch = w.drainAll(batch)
 			w.mu.Unlock()
-			if len(batch) > 0 {
-				w.flush(context.Background(), batch)
-			}
+			w.flushFinal(batch, "context-cancel")
 			return
 
 		case <-w.wakeCh:
@@ -244,7 +269,9 @@ func (w *Writer) run(ctx context.Context) {
 				if len(batch) < w.batchSize {
 					break
 				}
-				w.flush(ctx, batch)
+				if !w.flush(ctx, batch) {
+					break
+				}
 				batch = batch[:0]
 			}
 			// If we accumulated a partial batch, flush it on the next
