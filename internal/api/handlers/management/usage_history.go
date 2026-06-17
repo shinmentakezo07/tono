@@ -30,9 +30,10 @@ func (h *Handler) GetUsageHistory(c *gin.Context) {
 			days = parsed
 		}
 	}
-	limit := 1000
+	// 0 = no limit (return every record in the window).
+	limit := 0
 	if l := c.Query("limit"); l != "" {
-		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
+		if parsed, err := strconv.Atoi(l); err == nil && parsed >= 0 {
 			limit = parsed
 		}
 	}
@@ -91,7 +92,7 @@ func (h *Handler) GetUsageHistory(c *gin.Context) {
 		if rec.Timestamp.IsZero() || rec.Timestamp.After(since) || rec.Timestamp.Equal(since) {
 			filtered = append(filtered, raw)
 		}
-		if len(filtered) >= limit {
+		if limit > 0 && len(filtered) >= limit {
 			break
 		}
 	}

@@ -105,7 +105,6 @@ func (s *PgStore) InsertBatch(ctx context.Context, records []PgRecord) error {
 		)
 		ON CONFLICT (event_id, created_at) WHERE event_id <> '' DO NOTHING`
 
-
 	for i := range records {
 		r := &records[i]
 		batch.Queue(query,
@@ -134,6 +133,7 @@ func (s *PgStore) InsertBatch(ctx context.Context, records []PgRecord) error {
 
 // QueryHistory retrieves usage records within a time range.
 // Returns records in JSONLRecord-compatible format for the management handler.
+// If limit <= 0, no LIMIT clause is applied and every row in the window is returned.
 func (s *PgStore) QueryHistory(ctx context.Context, since time.Time, limit int) ([]JSONLRecord, error) {
 	query := `
 		SELECT event_id, created_at, provider, model, alias, endpoint, auth_type, api_key,
@@ -143,10 +143,14 @@ func (s *PgStore) QueryHistory(ctx context.Context, since time.Time, limit int) 
 			failed, fail_status_code, fail_body
 		FROM usage_records
 		WHERE created_at >= $1
-		ORDER BY created_at DESC
-		LIMIT $2`
+		ORDER BY created_at DESC`
+	args := []any{since}
+	if limit > 0 {
+		query += ` LIMIT $2`
+		args = append(args, limit)
+	}
 
-	rows, err := s.pool.Query(ctx, query, since, limit)
+	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("usagehistory: query: %w", err)
 	}
