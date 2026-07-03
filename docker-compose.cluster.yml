@@ -12,11 +12,19 @@ services:
     container_name: cli-proxy-api-cluster
     environment:
       HOME_JWT: ${HOME_JWT:-}
+      # SQLite-backed token store: persist config and auth tokens in usg.db
+      SQLITESTORE_ENABLED: ${SQLITESTORE_ENABLED:-true}
+      SQLITESTORE_PATH: ${SQLITESTORE_PATH:-/CLIProxyAPI/data/usg.db}
+      # SQLite usage-history: replace JSONL with durable usg.db records
+      USAGE_HISTORY_SQLITE_ENABLED: ${USAGE_HISTORY_SQLITE_ENABLED:-true}
+      WRITABLE_PATH: ${WRITABLE_PATH:-/CLIProxyAPI/data}
     ports:
       - "8317:8317"
     volumes:
       - ./home:/root/.cli-proxy-api
       - ./logs:/CLIProxyAPI/logs
+      # Persist SQLite database (usg.db) across container restarts
+      - ${CLI_PROXY_DATA_PATH:-./data}:/CLIProxyAPI/data
     command: >
       sh -eu -c '
         if [ -z "$$HOME_JWT" ]; then

@@ -21,7 +21,7 @@ logs/*
 conv/*
 config.yaml
 
-# Development/editor
+# Development/editor/tooling metadata
 bin/*
 .vscode/*
 .claude/*
@@ -32,6 +32,12 @@ bin/*
 .agents/*
 .opencode/*
 .idea/*
+.beads/*
 .bmad/*
 _bmad/*
 _bmad-output/*
+.kimchi/*
+
+# Web UI: node_modules and dist are rebuilt inside the Docker image
+webui/node_modules/*
+webui/dist/*
