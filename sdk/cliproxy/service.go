@@ -413,6 +413,11 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 		if compatProviderKey == "" {
 			compatProviderKey = "openai-compatibility"
 		}
+		lower := strings.ToLower(compatProviderKey)
+		if lower == "nvidia" || lower == "nvidia-nim" {
+			s.coreManager.RegisterExecutor(executor.NewNvidiaNimExecutor(compatProviderKey, s.cfg))
+			return
+		}
 		s.coreManager.RegisterExecutor(executor.NewOpenAICompatExecutor(compatProviderKey, s.cfg))
 		return
 	}
@@ -440,6 +445,10 @@ func (s *Service) ensureExecutorsForAuthWithMode(a *coreauth.Auth, forceReplace 
 		providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
 		if providerKey == "" {
 			providerKey = "openai-compatibility"
+		}
+		if providerKey == "nvidia" || providerKey == "nvidia-nim" {
+			s.coreManager.RegisterExecutor(executor.NewNvidiaNimExecutor(providerKey, s.cfg))
+			return
 		}
 		s.coreManager.RegisterExecutor(executor.NewOpenAICompatExecutor(providerKey, s.cfg))
 	}
@@ -593,6 +602,7 @@ func (s *Service) registerHomeExecutors() {
 	s.coreManager.RegisterExecutor(executor.NewAntigravityExecutor(s.cfg))
 	s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
 	s.coreManager.RegisterExecutor(executor.NewOpenAICompatExecutor("openai-compatibility", s.cfg))
+	s.coreManager.RegisterExecutor(executor.NewNvidiaNimExecutor("nvidia", s.cfg))
 }
 
 func (s *Service) applyHomeOverlay(remoteCfg *config.Config) {

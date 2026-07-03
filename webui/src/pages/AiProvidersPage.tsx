@@ -6,6 +6,7 @@ import {
   ClaudeSection,
   CodexSection,
   GeminiSection,
+  NvidiaSection,
   OpenAISection,
   VertexSection,
   ProviderNav,
@@ -22,6 +23,11 @@ import { useAuthStore, useConfigStore, useNotificationStore, useThemeStore } fro
 import type { GeminiKeyConfig, OpenAIProviderConfig, ProviderKeyConfig } from '@/types';
 import { indexUsageDetailsByAuthIndex, indexUsageDetailsBySource } from '@/utils/usageIndex';
 import styles from './AiProvidersPage.module.scss';
+
+const isNimProvider = (provider: OpenAIProviderConfig) => {
+  const name = provider.name?.trim().toLowerCase();
+  return name === 'nvidia' || name === 'nvidia-nim';
+};
 
 export function AiProvidersPage() {
   const { t } = useTranslation();
@@ -54,6 +60,9 @@ export function AiProvidersPage() {
   );
   const [openaiProviders, setOpenaiProviders] = useState<OpenAIProviderConfig[]>(
     () => config?.openaiCompatibility || []
+  );
+  const [nvidiaProviders, setNvidiaProviders] = useState<OpenAIProviderConfig[]>(
+    () => (config?.openaiCompatibility || []).filter(isNimProvider)
   );
 
   const [configSwitchingKey, setConfigSwitchingKey] = useState<string | null>(null);
@@ -105,7 +114,9 @@ export function AiProvidersPage() {
       setCodexConfigs(data?.codexApiKeys || []);
       setClaudeConfigs(data?.claudeApiKeys || []);
       setVertexConfigs(data?.vertexApiKeys || []);
-      setOpenaiProviders(data?.openaiCompatibility || []);
+      const allOpenAI = data?.openaiCompatibility || [];
+      setOpenaiProviders(allOpenAI.filter((p) => !isNimProvider(p)));
+      setNvidiaProviders(allOpenAI.filter(isNimProvider));
 
       if (vertexResult.status === 'fulfilled') {
         setVertexConfigs(vertexResult.value || []);
@@ -119,8 +130,10 @@ export function AiProvidersPage() {
       }
 
       if (openaiResult.status === 'fulfilled') {
-        setOpenaiProviders(openaiResult.value || []);
-        updateConfigValue('openai-compatibility', openaiResult.value || []);
+        const allOpenAI = openaiResult.value || [];
+        setOpenaiProviders(allOpenAI.filter((p) => !isNimProvider(p)));
+        setNvidiaProviders(allOpenAI.filter(isNimProvider));
+        updateConfigValue('openai-compatibility', allOpenAI);
         clearCache('openai-compatibility');
       }
     } catch (err: unknown) {
@@ -147,7 +160,11 @@ export function AiProvidersPage() {
     if (config?.codexApiKeys) setCodexConfigs(config.codexApiKeys);
     if (config?.claudeApiKeys) setClaudeConfigs(config.claudeApiKeys);
     if (config?.vertexApiKeys) setVertexConfigs(config.vertexApiKeys);
-    if (config?.openaiCompatibility) setOpenaiProviders(config.openaiCompatibility);
+    if (config?.openaiCompatibility) {
+      const all = config.openaiCompatibility;
+      setOpenaiProviders(all.filter((p) => !isNimProvider(p)));
+      setNvidiaProviders(all.filter(isNimProvider));
+    }
   }, [
     config?.geminiApiKeys,
     config?.codexApiKeys,
@@ -354,6 +371,33 @@ export function AiProvidersPage() {
     });
   };
 
+  const deleteNvidia = async (index: number) => {
+    const entry = nvidiaProviders[index];
+    if (!entry) return;
+    showConfirmation({
+      title: t('ai_providers.nvidia_delete_confirm'),
+      message: t('ai_providers.nvidia_delete_confirm'),
+      variant: 'danger',
+      confirmText: t('common.confirm'),
+      onConfirm: async () => {
+        try {
+          await providersApi.deleteOpenAIProvider(entry.name);
+          const allOpenAI = (config?.openaiCompatibility || []).filter(
+            (p) => p.name !== entry.name
+          );
+          setOpenaiProviders(allOpenAI.filter((p) => !isNimProvider(p)));
+          setNvidiaProviders(allOpenAI.filter(isNimProvider));
+          updateConfigValue('openai-compatibility', allOpenAI);
+          clearCache('openai-compatibility');
+          showNotification(t('notification.nvidia_provider_deleted'), 'success');
+        } catch (err: unknown) {
+          const message = getErrorMessage(err);
+          showNotification(`${t('notification.delete_failed')}: ${message}`, 'error');
+        }
+      },
+    });
+  };
+
   const deleteOpenai = async (index: number) => {
     const entry = openaiProviders[index];
     if (!entry) return;
@@ -445,6 +489,28 @@ export function AiProvidersPage() {
             onEdit={(index) => openEditor(`/ai-providers/vertex/${index}`)}
             onDelete={deleteVertex}
             onToggle={(index, enabled) => void setConfigEnabled('vertex', index, enabled)}
+          />
+        </div>
+
+        <div id="provider-nvidia">
+          <NvidiaSection
+            configs={nvidiaProviders}
+            keyStats={keyStats}
+            usageDetailsBySource={usageDetailsBySource}
+            usageDetailsByAuthIndex={usageDetailsByAuthIndex}
+            loading={loading}
+            disableControls={disableControls}
+            isSwitching={isSwitching}
+            resolvedTheme={resolvedTheme}
+            onAdd={() => openEditor('/ai-providers/nvidia/new')}
+            onEdit={(index) => {
+              const entry = nvidiaProviders[index];
+              const realIndex = entry
+                ? (config?.openaiCompatibility || []).findIndex((p) => p === entry)
+                : -1;
+              openEditor(`/ai-providers/nvidia/${realIndex >= 0 ? realIndex : index}`);
+            }}
+            onDelete={deleteNvidia}
           />
         </div>
 

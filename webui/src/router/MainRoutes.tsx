@@ -10,6 +10,8 @@ import { AiProvidersGeminiEditPage } from '@/pages/AiProvidersGeminiEditPage';
 import { AiProvidersOpenAIEditLayout } from '@/pages/AiProvidersOpenAIEditLayout';
 import { AiProvidersOpenAIEditPage } from '@/pages/AiProvidersOpenAIEditPage';
 import { AiProvidersOpenAIModelsPage } from '@/pages/AiProvidersOpenAIModelsPage';
+import { AiProvidersNvidiaEditLayout } from '@/pages/AiProvidersNvidiaEditLayout';
+import { AiProvidersNvidiaEditPage } from '@/pages/AiProvidersNvidiaEditPage';
 import { AiProvidersVertexEditPage } from '@/pages/AiProvidersVertexEditPage';
 import { AuthFilesPage } from '@/pages/AuthFilesPage';
 import { AuthFilesOAuthExcludedEditPage } from '@/pages/AuthFilesOAuthExcludedEditPage';
@@ -65,6 +67,20 @@ const mainRoutes = [
     ],
   },
   { path: '/ai-providers/ampcode', element: <AiProvidersAmpcodeEditPage /> },
+  {
+    path: '/ai-providers/nvidia/new',
+    element: <AiProvidersNvidiaEditLayout />,
+    children: [
+      { index: true, element: <AiProvidersNvidiaEditPage /> },
+    ],
+  },
+  {
+    path: '/ai-providers/nvidia/:index',
+    element: <AiProvidersNvidiaEditLayout />,
+    children: [
+      { index: true, element: <AiProvidersNvidiaEditPage /> },
+    ],
+  },
   { path: '/ai-providers', element: <AiProvidersPage /> },
   { path: '/ai-providers/*', element: <AiProvidersPage /> },
   { path: '/auth-files', element: <AuthFilesPage /> },

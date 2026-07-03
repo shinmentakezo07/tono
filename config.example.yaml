@@ -256,6 +256,28 @@ nonstream-keepalive-interval: 0
 #   user-agent: "codex_cli_rs/0.114.0 (Mac OS 14.2.0; x86_64) vscode/1.111.0"
 #   beta-features: "multi_agent"
 
+# NVIDIA NIM providers (OpenAI-compatible entries with name "nvidia" or "nvidia-nim")
+# Uses a dedicated NVIDIA NIM executor with tool-schema sanitization, retry downgrades, and NIM-specific request shaping.
+# The default base URL is https://integrate.api.nvidia.com/v1 if omitted.
+# openai-compatibility:
+#   - name: "nvidia"
+#     disabled: false
+#     prefix: "test"
+#     base-url: "https://integrate.api.nvidia.com/v1"
+#     disable-cooling: false
+#     headers:
+#       X-Custom-Header: "custom-value"
+#     api-key-entries:
+#       - api-key: "nvapi-****************"
+#         proxy-url: "socks5://proxy.example.com:1080"
+#     models:
+#       - name: "nvidia/llama-3.3-nemotron-super-49b-v1"
+#         alias: "nemotron-super-49b"
+#       - name: "nvidia/llama-3.1-nemotron-nano-8b-v1"
+#         alias: "nemotron-nano-8b"
+#       - name: "deepseek-ai/deepseek-r1"
+#         alias: "deepseek-r1-nim"
+
 # OpenAI compatibility providers
 # openai-compatibility:
 #   - name: "openrouter" # The name of the provider; it will be used in the user agent and other places.
